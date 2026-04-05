@@ -295,18 +295,27 @@ export async function initFilesystemPostRuntime(
     await config.fsInit(Module.FS, { sitePackages: Module.API.sitePackages });
   }
 
-  // 6. Mount OPFS via promising-wrapped raw exports
+  // 6. Mount OPFS at /opfs via promising-wrapped raw WASM exports.
+  // The new JSPI API (WebAssembly.promising) does NOT prepend a suspender arg.
   try {
     const rawExports = (Module as any)._rawWasmExports;
     if (rawExports?.wasmfs_create_opfs_backend) {
       const promising = (WebAssembly as any).promising;
       const createOpfs = promising(rawExports.wasmfs_create_opfs_backend);
-      const createDir = promising(rawExports.wasmfs_create_directory);
-      const opfs = await createOpfs(null);
+      const opfs = await createOpfs();
       if (opfs) {
-        const pathPtr = (Module as any).stringToUTF8OnStack("/opfs");
-        await createDir(null, pathPtr, 0o777, opfs);
-        console.log("[PyodideLoader] OPFS mounted at /opfs");
+        const M = Module as any;
+        const pathBytes = new TextEncoder().encode("/opfs\0");
+        const pathPtr = M._malloc(pathBytes.length);
+        M.HEAPU8.set(pathBytes, pathPtr);
+        const mountFn = promising(rawExports._wasmfs_mount);
+        const ret = await mountFn(pathPtr, opfs);
+        M._free(pathPtr);
+        if (ret < 0) {
+          console.warn("[PyodideLoader] OPFS mount returned:", ret);
+        } else {
+          console.log("[PyodideLoader] OPFS mounted at /opfs");
+        }
       }
     }
   } catch (e) {
