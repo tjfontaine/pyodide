@@ -58,8 +58,14 @@ export function createPromising(wasm_func) {
  *   enabled (used in callPyObjectKwargsSuspending in pyproxy.ts)
  */
 export function initSuspenders() {
-  promisingApplyHandler = createPromising(wasmExports._pyproxy_apply_promising);
-  if (wasmExports.run_main_promising) {
-    promisingRunMainHandler = createPromising(wasmExports.run_main_promising);
+  // With ASYNCIFY=2 (JSPI) + MAIN_MODULE=1, wasmExports are wrapped by
+  // Asyncify.instrumentWasmExports() before initSuspenders runs. The wrapped
+  // functions are JS wrappers, not raw WASM exports, so WebAssembly.promising()
+  // rejects them. Use Module._rawWasmExports (saved before instrumentation)
+  // to get the original WASM exports.
+  const exports = Module._rawWasmExports || wasmExports;
+  promisingApplyHandler = createPromising(exports._pyproxy_apply_promising);
+  if (exports.run_main_promising) {
+    promisingRunMainHandler = createPromising(exports.run_main_promising);
   }
 }

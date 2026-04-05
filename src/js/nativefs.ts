@@ -34,6 +34,9 @@ export async function syncRemoteToLocal(m: PyodideModule): Promise<void> {
  */
 export function initializeNativeFS(module: PyodideModule) {
   const FS = module.FS;
+  if (!FS.filesystems || !FS.filesystems.MEMFS) {
+    return;
+  }
   const MEMFS = module.FS.filesystems.MEMFS;
   const PATH = module.PATH;
 

@@ -89,8 +89,7 @@ src/core/libpyodide.a: \
 	src/core/pyodide_pre.o \
 	src/core/stack_switching/pystate.o \
 	src/core/stack_switching/suspenders.o \
-	src/core/print.o \
-	src/core/socket_syscalls.o
+	src/core/print.o
 
 	emar rcs src/core/libpyodide.a $(filter %.o,$^)
 
@@ -106,9 +105,13 @@ $(CPYTHONINSTALL)/lib/libpyodide.a: src/core/libpyodide.a
 $(CPYTHONINSTALL)/.installed-pyodide: $(CPYTHONINSTALL)/include/pyodide/.installed $(CPYTHONINSTALL)/lib/libpyodide.a
 	touch $@
 
+src/core/opfs_mount.o: src/core/opfs_mount.c
+	$(CC) $(MAIN_MODULE_CFLAGS) -c $< -o $@
+
 dist/pyodide.asm.mjs: \
 	dist \
 	src/core/main.o  \
+	src/core/opfs_mount.o \
 	$(wildcard src/py/lib/*.py) \
 	$(CPYTHONLIB) \
 	$(CPYTHONINSTALL)/.installed-pyodide
@@ -117,11 +120,17 @@ dist/pyodide.asm.mjs: \
    # TODO(ryanking13): Link libgl to a side module not to the main module.
    # For unknown reason, a side module cannot see symbols when libGL is linked to it.
 	embuilder build libgl
-	$(CXX) -o dist/pyodide.asm.mjs -lpyodide src/core/main.o $(MAIN_MODULE_LDFLAGS)
+	$(CXX) -o dist/pyodide.asm.mjs -lpyodide src/core/main.o src/core/opfs_mount.o $(MAIN_MODULE_LDFLAGS)
 
 	if [[ -n $${PYODIDE_SOURCEMAP+x} ]] || [[ -n $${PYODIDE_SYMBOLS+x} ]] || [[ -n $${PYODIDE_DEBUG_JS+x} ]]; then \
 		cd dist && npx prettier -w pyodide.asm.mjs ; \
 	fi
+
+   # Save raw WASM exports on Module before Asyncify.instrumentWasmExports wraps them.
+   # WebAssembly.promising() requires raw WASM exports, not JS wrappers.
+   # The pattern "var origExports=wasmExports" already exists in the generated code;
+   # we append Module._rawWasmExports=origExports right after it.
+	$(SED) -i 's/var origExports=wasmExports/var origExports=wasmExports;Module._rawWasmExports=origExports/' dist/pyodide.asm.mjs
 
    # Strip out C++ symbols which all start __Z.
    # There are 4821 of these and they have VERY VERY long names.

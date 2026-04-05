@@ -149,6 +149,9 @@ export LDFLAGS_BASE=\
 	-s WASM_BIGINT \
 	-fwasm-exceptions \
 	-sSUPPORT_LONGJMP=wasm \
+	-s WASMFS \
+	-s ASYNCIFY=2 \
+	-Wl,--allow-multiple-definition \
 	$(EXTRA_LDFLAGS) \
 
 export CXXFLAGS_BASE=
@@ -175,18 +178,16 @@ export MAIN_MODULE_LDFLAGS= $(LDFLAGS_BASE) \
 	-s NODEJS_CATCH_REJECTION=0 \
 	-s EXPORTED_FUNCTIONS='$(EXPORTS)'\
 	-s EXIT_RUNTIME \
+	-s ERROR_ON_UNDEFINED_SYMBOLS=0 \
 	\
 	-lpython$(PYMAJOR).$(PYMINOR)$(CPYTHON_ABI_FLAGS) \
 	-lffi \
 	-llzma \
 	-lsqlite3 \
 	-lstdc++ \
-	-lidbfs.js \
-	-lnodefs.js \
-	-lproxyfs.js \
-	-lworkerfs.js \
 	-lwebsocket.js \
 	-leventloop.js \
+	-lwasmfs_opfs.js \
 	-lhiwire \
 	\
 	-lGL \
@@ -296,10 +297,7 @@ ifeq ($(DISABLE_DYLINK), 1)
 		-lffi \
 		-lhiwire \
 		-llzma \
-		-lsqlite3 \
-		-lidbfs.js \
-		-lnodefs.js \
-		-lproxyfs.js
+		-lsqlite3
 
 endif
 

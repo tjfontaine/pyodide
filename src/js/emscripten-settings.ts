@@ -173,22 +173,72 @@ function installStdlib(stdlibURL: string): PreRunFunc {
  * @private
  */
 function getFileSystemInitializationFuncs(
-  config: PyodideConfigWithDefaults,
+  _config: PyodideConfigWithDefaults,
 ): PreRunFunc[] {
-  let stdLibURL;
-  if (config.stdLibURL != undefined) {
-    stdLibURL = config.stdLibURL;
-  } else {
-    stdLibURL = config.indexURL + "python_stdlib.zip";
+  // With WasmFS+JSPI, native FS functions aren't available during preRun.
+  return [];
+}
+
+/**
+ * Initialize the filesystem after the WASM runtime is ready.
+ * @private
+ */
+export async function initFilesystemPostRuntime(
+  Module: PyodideModule,
+  config: PyodideConfigWithDefaults,
+): Promise<void> {
+  initializeNativeFS(Module);
+  Object.assign(Module.ENV, config.env);
+
+  let homePath = config.env.HOME || "/home/pyodide";
+  try { Module.FS.mkdirTree(homePath); } catch (e) {
+    console.error(`Error making home '${homePath}':`, e);
+    homePath = "/";
+  }
+  try { Module.FS.chdir(homePath); } catch (e) {
+    console.error(`Error chdir to '${homePath}':`, e);
   }
 
-  return [
-    installStdlib(stdLibURL),
-    createHomeDirectory(config.env.HOME),
-    setEnvironment(config.env),
-    initializeNativeFS,
-    ...callFsInitHook(config.fsInit),
-  ];
+  let stdLibURL = config.stdLibURL ?? config.indexURL + "python_stdlib.zip";
+  const [pymajor, pyminor] = computeVersionTuple(Module);
+  Module.API.pyVersionTuple = [pymajor, pyminor, 0];
+  try { Module.FS.mkdirTree("/lib"); } catch (_) {}
+  Module.API.sitePackages = `/lib/python${pymajor}.${pyminor}/site-packages`;
+  try { Module.FS.mkdirTree(Module.API.sitePackages); } catch (_) {}
+
+  try {
+    const stdlib = await loadBinaryFile(stdLibURL);
+    Module.FS.writeFile(`/lib/python${pymajor}${pyminor}.zip`, stdlib);
+  } catch (e) {
+    console.error("Error installing stdlib:", e);
+  }
+
+  // 6. Mount OPFS at /opfs via WasmFS OPFS backend.
+  // The OPFS backend makes async JS calls (navigator.storage.getDirectory),
+  // so it must be called through a WebAssembly.promising()-wrapped function
+  // to enable JSPI suspension. We wrap the raw WASM export directly.
+  try {
+    const rawExports = (Module as any)._rawWasmExports;
+    if (rawExports?.wasmfs_create_opfs_backend) {
+      const promising = (WebAssembly as any).promising;
+      const createOpfs = promising(rawExports.wasmfs_create_opfs_backend);
+      const createDir = promising(rawExports.wasmfs_create_directory);
+      const opfs = await createOpfs(null);
+      if (opfs) {
+        const pathPtr = (Module as any).stringToUTF8OnStack("/opfs");
+        await createDir(null, pathPtr, 0o777, opfs);
+        console.log("[PyodideLoader] OPFS mounted at /opfs");
+      } else {
+        console.warn("[PyodideLoader] Failed to create OPFS backend");
+      }
+    }
+  } catch (e) {
+    console.warn("[PyodideLoader] Could not mount OPFS:", e);
+  }
+
+  if (config.fsInit) {
+    await config.fsInit(Module.FS, { sitePackages: Module.API.sitePackages });
+  }
 }
 
 function getInstantiateWasmFunc(
