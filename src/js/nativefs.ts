@@ -34,6 +34,11 @@ export async function syncRemoteToLocal(m: PyodideModule): Promise<void> {
  */
 export function initializeNativeFS(module: PyodideModule) {
   const FS = module.FS;
+  // WasmFS does not have MEMFS in FS.filesystems — OPFS is mounted
+  // at the C level via wasmfs_before_preload() instead.
+  if (!FS.filesystems || !FS.filesystems.MEMFS) {
+    return;
+  }
   const MEMFS = module.FS.filesystems.MEMFS;
   const PATH = module.PATH;
 

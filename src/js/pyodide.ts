@@ -10,7 +10,7 @@ import {
   calculateInstallBaseUrl,
 } from "./compat";
 
-import { createSettings } from "./emscripten-settings";
+import { createSettings, initFilesystemPostRuntime } from "./emscripten-settings";
 import { version as version_ } from "./version";
 
 import type { PyodideAPI } from "./api.js";
@@ -488,6 +488,9 @@ export async function loadPyodide(
 
   // Stage 5: Create and initialize the Emscripten module
   const pyodideModule = await createPyodideModule(emscriptenSettings);
+
+  // Stage 5.5: Initialize filesystem post-runtime (WasmFS+JSPI requires this)
+  await initFilesystemPostRuntime(pyodideModule, config);
 
   // Stage 6: Configure API and validate versions
   configureAPI(pyodideModule, config);

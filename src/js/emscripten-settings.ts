@@ -173,22 +173,61 @@ function installStdlib(stdlibURL: string): PreRunFunc {
  * @private
  */
 function getFileSystemInitializationFuncs(
-  config: PyodideConfigWithDefaults,
+  _config: PyodideConfigWithDefaults,
 ): PreRunFunc[] {
-  let stdLibURL;
-  if (config.stdLibURL != undefined) {
-    stdLibURL = config.stdLibURL;
-  } else {
-    stdLibURL = config.indexURL + "python_stdlib.zip";
+  // With WasmFS+JSPI, native FS functions aren't available during preRun.
+  // Return empty — filesystem init is done post-runtime via initFilesystemPostRuntime().
+  return [];
+}
+
+/**
+ * Initialize the filesystem after the WASM runtime is ready.
+ * Called from loadPyodide() after _createPyodideModule() resolves.
+ * @private
+ */
+export async function initFilesystemPostRuntime(
+  Module: PyodideModule,
+  config: PyodideConfigWithDefaults,
+): Promise<void> {
+  // 1. Initialize NativeFS (no-op with WasmFS)
+  initializeNativeFS(Module);
+
+  // 2. Set environment
+  Object.assign(Module.ENV, config.env);
+
+  // 3. Create home directory
+  let homePath = config.env.HOME || "/home/pyodide";
+  try {
+    Module.FS.mkdirTree(homePath);
+  } catch (e) {
+    console.error(`Error making home directory '${homePath}':`, e);
+    homePath = "/";
+  }
+  try {
+    Module.FS.chdir(homePath);
+  } catch (e) {
+    console.error(`Error chdir to '${homePath}':`, e);
   }
 
-  return [
-    installStdlib(stdLibURL),
-    createHomeDirectory(config.env.HOME),
-    setEnvironment(config.env),
-    initializeNativeFS,
-    ...callFsInitHook(config.fsInit),
-  ];
+  // 4. Install stdlib
+  let stdLibURL = config.stdLibURL ?? config.indexURL + "python_stdlib.zip";
+  const [pymajor, pyminor] = computeVersionTuple(Module);
+  Module.API.pyVersionTuple = [pymajor, pyminor, 0];
+  try { Module.FS.mkdirTree("/lib"); } catch (_) {}
+  Module.API.sitePackages = `/lib/python${pymajor}.${pyminor}/site-packages`;
+  try { Module.FS.mkdirTree(Module.API.sitePackages); } catch (_) {}
+
+  try {
+    const stdlib = await loadBinaryFile(stdLibURL);
+    Module.FS.writeFile(`/lib/python${pymajor}${pyminor}.zip`, stdlib);
+  } catch (e) {
+    console.error("Error installing stdlib:", e);
+  }
+
+  // 5. fsInit hook
+  if (config.fsInit) {
+    await config.fsInit(Module.FS, { sitePackages: Module.API.sitePackages });
+  }
 }
 
 function getInstantiateWasmFunc(

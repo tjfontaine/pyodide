@@ -148,6 +148,8 @@ export LDFLAGS_BASE=\
 	-s WASM_BIGINT \
 	-fwasm-exceptions \
 	-sSUPPORT_LONGJMP \
+	-s WASMFS \
+	-s ASYNCIFY=2 \
 	$(EXTRA_LDFLAGS) \
 
 export CXXFLAGS_BASE=
@@ -182,12 +184,9 @@ export MAIN_MODULE_LDFLAGS= $(LDFLAGS_BASE) \
 	-lpython$(PYMAJOR).$(PYMINOR)$(CPYTHON_ABI_FLAGS) \
 	-lffi \
 	-lstdc++ \
-	-lidbfs.js \
-	-lnodefs.js \
-	-lproxyfs.js \
-	-lworkerfs.js \
 	-lwebsocket.js \
 	-leventloop.js \
+	-lwasmfs_opfs.js \
 	-lhiwire \
 	\
 	-lGL \
@@ -295,10 +294,7 @@ ifeq ($(DISABLE_DYLINK), 1)
 		-sERROR_ON_UNDEFINED_SYMBOLS=0 \
 		-lpython$(PYMAJOR).$(PYMINOR)$(CPYTHON_ABI_FLAGS) \
 		-lffi \
-		-lhiwire \
-		-lidbfs.js \
-		-lnodefs.js \
-    -lproxyfs.js
+		-lhiwire
 
 endif
 
