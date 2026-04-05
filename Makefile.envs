@@ -127,6 +127,7 @@ export LDFLAGS_BASE=\
 	$(DBG_LDFLAGS) \
 	-L$(CPYTHONROOT)/installs/python-$(PYVERSION)/lib/ \
 	-s WASM_BIGINT \
+	-s WASMFS \
 	$(EXTRA_LDFLAGS)
 
 export CXXFLAGS_BASE=
@@ -157,10 +158,6 @@ export MAIN_MODULE_LDFLAGS= $(LDFLAGS_BASE) \
 	-lpython$(PYMAJOR).$(PYMINOR)$(CPYTHON_ABI_FLAGS) \
 	-lffi \
 	-lstdc++ \
-	-lidbfs.js \
-	-lnodefs.js \
-	-lproxyfs.js \
-	-lworkerfs.js \
 	-lwebsocket.js \
 	-leventloop.js \
 	-lhiwire \
@@ -266,8 +263,6 @@ ifeq ($(DISABLE_DYLINK), 1)
 		-lpython$(PYMAJOR).$(PYMINOR)$(CPYTHON_ABI_FLAGS) \
 		-lffi \
 		-lhiwire \
-		-lidbfs.js \
-		-lnodefs.js \
 
 endif
 
