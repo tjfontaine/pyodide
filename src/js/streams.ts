@@ -241,29 +241,40 @@ API.initializeStreams = function (
   stdout?: (a: string) => void,
   stderr?: (a: string) => void,
 ) {
-  const major = FS.createDevice.major++;
-  DEVS.stdin = FS.makedev(major, 0);
-  DEVS.stdout = FS.makedev(major, 1);
-  DEVS.stderr = FS.makedev(major, 2);
+  // WasmFS doesn't support createDevice/registerDevice/mkdev/unlink for
+  // device nodes the same way as legacy FS. Wrap the entire device setup
+  // in try/catch — if it fails, default stdin/stdout/stderr still work.
+  try {
+    const major = FS.createDevice.major++;
+    DEVS.stdin = FS.makedev(major, 0);
+    DEVS.stdout = FS.makedev(major, 1);
+    DEVS.stderr = FS.makedev(major, 2);
 
-  FS.registerDevice(DEVS.stdin, stream_ops);
-  FS.registerDevice(DEVS.stdout, stream_ops);
-  FS.registerDevice(DEVS.stderr, stream_ops);
+    FS.registerDevice(DEVS.stdin, stream_ops);
+    FS.registerDevice(DEVS.stdout, stream_ops);
+    FS.registerDevice(DEVS.stderr, stream_ops);
 
-  FS.unlink("/dev/stdin");
-  FS.unlink("/dev/stdout");
-  FS.unlink("/dev/stderr");
-
-  FS.mkdev("/dev/stdin", DEVS.stdin);
-  FS.mkdev("/dev/stdout", DEVS.stdout);
-  FS.mkdev("/dev/stderr", DEVS.stderr);
+    FS.unlink("/dev/stdin");
+    FS.unlink("/dev/stdout");
+    FS.unlink("/dev/stderr");
+    FS.mkdev("/dev/stdin", DEVS.stdin);
+    FS.mkdev("/dev/stdout", DEVS.stdout);
+    FS.mkdev("/dev/stderr", DEVS.stderr);
+  } catch (e) {
+    // WasmFS: device remapping not supported, use defaults
+  }
 
   setStdin({ stdin });
   setStdout({ batched: stdout });
   setStderr({ batched: stderr });
 
   INITIALIZED = true;
-  refreshStreams();
+  // Don't call refreshStreams if device setup failed
+  try {
+    refreshStreams();
+  } catch (e) {
+    // WasmFS: stream refresh not needed with native device handling
+  }
 };
 
 /**

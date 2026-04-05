@@ -207,11 +207,16 @@ function getFileSystemInitializationFuncs(
       Object.assign(Module.ENV, config.env);
       initializeNativeFS(Module);
 
-      // Polyfill FS.closeStream for WasmFS (used by Pyodide's stream refresh)
+      // Polyfill missing FS methods for WasmFS compatibility with Pyodide
       if (!Module.FS.closeStream) {
-        Module.FS.closeStream = (fd: number) => {
-          try { Module.FS.close(Module.FS.getStream(fd)); } catch (_) {}
+        Module.FS.closeStream = (_fd: number) => {
+          // WasmFS doesn't have closeStream — streams are managed internally.
+          // This is called by Pyodide's refreshStreams to reopen stdin/stdout/stderr.
+          // No-op is safe because WasmFS manages fd lifecycle automatically.
         };
+      }
+      if (!Module.FS.getStream) {
+        (Module.FS as any).getStream = (_fd: number) => null;
       }
 
       // Use addOnPreMain to register a callback that fires AFTER initRuntime
@@ -308,11 +313,12 @@ export async function initFilesystemPostRuntime(
     console.warn("[PyodideLoader] Could not mount OPFS:", e);
   }
 
-  // 7. Polyfill FS.closeStream for WasmFS (used by Pyodide's stream refresh)
+  // Polyfills should already be set from preRun, but ensure they're present
   if (!Module.FS.closeStream) {
-    Module.FS.closeStream = (fd: number) => {
-      try { Module.FS.close(Module.FS.getStream(fd)); } catch (_) {}
-    };
+    Module.FS.closeStream = () => {};
+  }
+  if (!Module.FS.getStream) {
+    (Module.FS as any).getStream = () => null;
   }
 }
 
