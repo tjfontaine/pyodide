@@ -151,7 +151,6 @@ export LDFLAGS_BASE=\
 	-sSUPPORT_LONGJMP=wasm \
 	-s WASMFS \
 	-s ASYNCIFY=2 \
-	-Wl,--allow-multiple-definition \
 	$(EXTRA_LDFLAGS) \
 
 export CXXFLAGS_BASE=
@@ -178,7 +177,6 @@ export MAIN_MODULE_LDFLAGS= $(LDFLAGS_BASE) \
 	-s NODEJS_CATCH_REJECTION=0 \
 	-s EXPORTED_FUNCTIONS='$(EXPORTS)'\
 	-s EXIT_RUNTIME \
-	-s ERROR_ON_UNDEFINED_SYMBOLS=0 \
 	\
 	-lpython$(PYMAJOR).$(PYMINOR)$(CPYTHON_ABI_FLAGS) \
 	-lffi \

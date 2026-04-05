@@ -84,17 +84,27 @@ export function createSettings(
  * @private
  */
 function createHomeDirectory(path: string): PreRunFunc {
-  return function (Module) {
-    const fallbackPath = "/";
+  // With WasmFS + ASYNCIFY, native FS functions don't work during preRun.
+  // Use addRunDependency to block callMain, await to yield until runtime is
+  // initialized, then do the FS work.
+  return async function (Module) {
+    Module.addRunDependency("create-home");
     try {
-      Module.FS.mkdirTree(path);
-    } catch (e) {
-      console.error(`Error occurred while making a home directory '${path}':`);
-      console.error(e);
-      console.error(`Using '${fallbackPath}' for a home directory instead`);
-      path = fallbackPath;
+      // Yield so initRuntime() runs before we touch the filesystem
+      await Promise.resolve();
+      const fallbackPath = "/";
+      try {
+        Module.FS.mkdirTree(path);
+      } catch (e) {
+        console.error(`Error making home directory '${path}':`, e);
+        path = fallbackPath;
+      }
+      try {
+        Module.FS.chdir(path);
+      } catch (_) { /* ignore */ }
+    } finally {
+      Module.removeRunDependency("create-home");
     }
-    Module.FS.chdir(path);
   };
 }
 
@@ -149,15 +159,21 @@ function computeVersionTuple(Module: PyodideModule): [number, number, number] {
 function installStdlib(stdlibURL: string): PreRunFunc {
   const stdlibPromise: Promise<Uint8Array> = loadBinaryFile(stdlibURL);
   return async (Module: PyodideModule) => {
-    Module.API.pyVersionTuple = computeVersionTuple(Module);
-    const [pymajor, pyminor] = Module.API.pyVersionTuple;
-    Module.FS.mkdirTree("/lib");
-    Module.API.sitePackages = `/lib/python${pymajor}.${pyminor}/site-packages`;
-    Module.FS.mkdirTree(Module.API.sitePackages);
+    // Don't call any native FS functions synchronously during preRun —
+    // with WasmFS + ASYNCIFY, the runtime isn't initialized yet.
+    // The addRunDependency blocks callMain. After the await below,
+    // the runtime will be initialized and FS calls work.
     Module.addRunDependency("install-stdlib");
 
     try {
       const stdlib = await stdlibPromise;
+      // After await, the event loop has ticked and initRuntime() has run.
+      // WasmFS is now initialized — safe to call FS methods.
+      Module.API.pyVersionTuple = computeVersionTuple(Module);
+      const [pymajor, pyminor] = Module.API.pyVersionTuple;
+      Module.FS.mkdirTree("/lib");
+      Module.API.sitePackages = `/lib/python${pymajor}.${pyminor}/site-packages`;
+      Module.FS.mkdirTree(Module.API.sitePackages);
       Module.FS.writeFile(`/lib/python${pymajor}${pyminor}.zip`, stdlib);
     } catch (e) {
       console.error("Error occurred while installing the standard library:");
@@ -173,10 +189,66 @@ function installStdlib(stdlibURL: string): PreRunFunc {
  * @private
  */
 function getFileSystemInitializationFuncs(
-  _config: PyodideConfigWithDefaults,
+  config: PyodideConfigWithDefaults,
 ): PreRunFunc[] {
-  // With WasmFS+JSPI, native FS functions aren't available during preRun.
-  return [];
+  // With WasmFS + ASYNCIFY=2, native FS functions don't work during preRun
+  // (WasmFS isn't initialized until initRuntime). Use preRun only for pure JS
+  // setup and addRunDependency. The actual FS work happens via preMain callbacks
+  // which fire AFTER initRuntime but BEFORE callMain.
+  let stdLibURL = config.stdLibURL ?? config.indexURL + "python_stdlib.zip";
+  const stdlibPromise: Promise<Uint8Array> = loadBinaryFile(stdLibURL);
+
+  return [
+    (Module: PyodideModule) => {
+      // Block callMain until FS is ready
+      Module.addRunDependency("wasmfs-stdlib");
+
+      // Pure JS setup (no native calls)
+      Object.assign(Module.ENV, config.env);
+      initializeNativeFS(Module);
+
+      // Polyfill FS.closeStream for WasmFS (used by Pyodide's stream refresh)
+      if (!Module.FS.closeStream) {
+        Module.FS.closeStream = (fd: number) => {
+          try { Module.FS.close(Module.FS.getStream(fd)); } catch (_) {}
+        };
+      }
+
+      // Use addOnPreMain to register a callback that fires AFTER initRuntime
+      // (WasmFS ready) but BEFORE callMain (Python needs stdlib).
+      // The stdlib is fetched async and cached; the preMain callback installs it.
+      let cachedStdlib: Uint8Array | null = null;
+      stdlibPromise.then(stdlib => { cachedStdlib = stdlib; });
+
+      const M = Module as any;
+      M.addOnPreMain(() => {
+        // initRuntime has run — WasmFS is initialized. Install stdlib.
+        const [pymajor, pyminor] = computeVersionTuple(Module);
+        Module.API.pyVersionTuple = [pymajor, pyminor, 0];
+        Module.FS.mkdirTree("/lib");
+        Module.API.sitePackages = `/lib/python${pymajor}.${pyminor}/site-packages`;
+        Module.FS.mkdirTree(Module.API.sitePackages);
+
+        if (cachedStdlib) {
+          Module.FS.writeFile(`/lib/python${pymajor}${pyminor}.zip`, cachedStdlib);
+        } else {
+          console.error("[WasmFS] stdlib not yet fetched when preMain fired!");
+        }
+
+        const homePath = config.env.HOME || "/home/pyodide";
+        try { Module.FS.mkdirTree(homePath); } catch (_) {}
+        try { Module.FS.chdir(homePath); } catch (_) {}
+      });
+
+      // Keep the run dependency until stdlib is fetched
+      stdlibPromise.then(() => {
+        Module.removeRunDependency("wasmfs-stdlib");
+      }).catch(e => {
+        console.error("[WasmFS] stdlib fetch error:", e);
+        Module.removeRunDependency("wasmfs-stdlib");
+      });
+    },
+  ];
 }
 
 /**
@@ -187,36 +259,38 @@ export async function initFilesystemPostRuntime(
   Module: PyodideModule,
   config: PyodideConfigWithDefaults,
 ): Promise<void> {
+  // At this point _createPyodideModule has resolved, initRuntime() has run,
+  // and WasmFS is initialized. But callMain hasn't run (noInitialRun: true).
+  // We install stdlib, create dirs, mount OPFS, then call main manually.
+
+  // 1. NativeFS (no-op with WasmFS)
   initializeNativeFS(Module);
+
+  // 2. Environment
   Object.assign(Module.ENV, config.env);
 
-  let homePath = config.env.HOME || "/home/pyodide";
-  try { Module.FS.mkdirTree(homePath); } catch (e) {
-    console.error(`Error making home '${homePath}':`, e);
-    homePath = "/";
-  }
-  try { Module.FS.chdir(homePath); } catch (e) {
-    console.error(`Error chdir to '${homePath}':`, e);
-  }
-
+  // 3. Install stdlib
   let stdLibURL = config.stdLibURL ?? config.indexURL + "python_stdlib.zip";
   const [pymajor, pyminor] = computeVersionTuple(Module);
   Module.API.pyVersionTuple = [pymajor, pyminor, 0];
-  try { Module.FS.mkdirTree("/lib"); } catch (_) {}
+  Module.FS.mkdirTree("/lib");
   Module.API.sitePackages = `/lib/python${pymajor}.${pyminor}/site-packages`;
-  try { Module.FS.mkdirTree(Module.API.sitePackages); } catch (_) {}
+  Module.FS.mkdirTree(Module.API.sitePackages);
 
-  try {
-    const stdlib = await loadBinaryFile(stdLibURL);
-    Module.FS.writeFile(`/lib/python${pymajor}${pyminor}.zip`, stdlib);
-  } catch (e) {
-    console.error("Error installing stdlib:", e);
+  const stdlib = await loadBinaryFile(stdLibURL);
+  Module.FS.writeFile(`/lib/python${pymajor}${pyminor}.zip`, stdlib);
+
+  // 4. Home directory
+  const homePath = config.env.HOME || "/home/pyodide";
+  try { Module.FS.mkdirTree(homePath); } catch (_) {}
+  try { Module.FS.chdir(homePath); } catch (_) {}
+
+  // 5. fsInit hook
+  if (config.fsInit) {
+    await config.fsInit(Module.FS, { sitePackages: Module.API.sitePackages });
   }
 
-  // 6. Mount OPFS at /opfs via WasmFS OPFS backend.
-  // The OPFS backend makes async JS calls (navigator.storage.getDirectory),
-  // so it must be called through a WebAssembly.promising()-wrapped function
-  // to enable JSPI suspension. We wrap the raw WASM export directly.
+  // 6. Mount OPFS via promising-wrapped raw exports
   try {
     const rawExports = (Module as any)._rawWasmExports;
     if (rawExports?.wasmfs_create_opfs_backend) {
@@ -228,16 +302,17 @@ export async function initFilesystemPostRuntime(
         const pathPtr = (Module as any).stringToUTF8OnStack("/opfs");
         await createDir(null, pathPtr, 0o777, opfs);
         console.log("[PyodideLoader] OPFS mounted at /opfs");
-      } else {
-        console.warn("[PyodideLoader] Failed to create OPFS backend");
       }
     }
   } catch (e) {
     console.warn("[PyodideLoader] Could not mount OPFS:", e);
   }
 
-  if (config.fsInit) {
-    await config.fsInit(Module.FS, { sitePackages: Module.API.sitePackages });
+  // 7. Polyfill FS.closeStream for WasmFS (used by Pyodide's stream refresh)
+  if (!Module.FS.closeStream) {
+    Module.FS.closeStream = (fd: number) => {
+      try { Module.FS.close(Module.FS.getStream(fd)); } catch (_) {}
+    };
   }
 }
 

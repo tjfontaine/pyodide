@@ -117,6 +117,9 @@ dist/pyodide.asm.mjs: \
 	$(CPYTHONINSTALL)/.installed-pyodide
 
 	@date +"[%F %T] Building pyodide.asm.mjs..."
+   # Remove CPython's emscripten_syscalls.o from libpython — its syscall overrides
+   # (especially __syscall_ioctl) conflict with WasmFS's own syscalls.
+	emar d $(CPYTHONINSTALL)/lib/libpython$(PYMAJOR).$(PYMINOR)$(CPYTHON_ABI_FLAGS).a emscripten_syscalls.o 2>/dev/null || true
    # TODO(ryanking13): Link libgl to a side module not to the main module.
    # For unknown reason, a side module cannot see symbols when libGL is linked to it.
 	embuilder build libgl
