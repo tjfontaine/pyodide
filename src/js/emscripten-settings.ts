@@ -304,8 +304,12 @@ export async function initFilesystemPostRuntime(
       const createOpfs = promising(rawExports.wasmfs_create_opfs_backend);
       const opfs = await createOpfs();
       if (opfs) {
+        // Mount OPFS at /home/user — this maps to navigator.storage.getDirectory().
+        // The shell's OPFS root is /, so shell's /foo.txt = Python's /home/user/foo.txt.
+        // This avoids a confusing /opfs prefix and matches the shell's home directory.
         const M = Module as any;
-        const pathBytes = new TextEncoder().encode("/opfs\0");
+        const mountPath = "/home/user";
+        const pathBytes = new TextEncoder().encode(mountPath + "\0");
         const pathPtr = M._malloc(pathBytes.length);
         M.HEAPU8.set(pathBytes, pathPtr);
         const mountFn = promising(rawExports._wasmfs_mount);
@@ -314,7 +318,7 @@ export async function initFilesystemPostRuntime(
         if (ret < 0) {
           console.warn("[PyodideLoader] OPFS mount returned:", ret);
         } else {
-          console.log("[PyodideLoader] OPFS mounted at /opfs");
+          console.log("[PyodideLoader] OPFS mounted at " + mountPath);
         }
       }
     }
