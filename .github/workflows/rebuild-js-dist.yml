@@ -90,11 +90,16 @@ jobs:
         working-directory: src/js
         run: npm ci
 
-      - name: Compile jsverror.wasm from WAT
+      - name: Verify jsverror.wasm present
         run: |
-          # jsverror.wasm is a tiny module compiled from WAT source
-          npm install -g wabt
-          wat2wasm src/core/jsverror.wat -o src/core/jsverror.wasm
+          # jsverror.wasm (90 bytes) is checked into the repo.
+          # It's compiled from jsverror.wat using a WasmGC-capable toolchain
+          # and changes very rarely.
+          if [ ! -f src/core/jsverror.wasm ]; then
+            echo "::error::src/core/jsverror.wasm missing — compile from jsverror.wat with a WasmGC-capable wat2wasm"
+            exit 1
+          fi
+          echo "jsverror.wasm present ($(wc -c < src/core/jsverror.wasm) bytes)"
 
       - name: Rebuild JS bundle
         working-directory: src/js
