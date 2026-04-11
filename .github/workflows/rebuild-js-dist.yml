@@ -18,6 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 30  # need history to find the previous dist release
 
       - uses: actions/setup-node@v4
         with:
