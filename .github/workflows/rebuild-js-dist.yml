@@ -26,11 +26,12 @@ jobs:
       - name: Compute SHAs
         id: shas
         run: |
-          CURRENT_SHA=$(git rev-parse --short HEAD)
+          CURRENT_SHA=$(git rev-parse HEAD | cut -c1-8)
           echo "current=$CURRENT_SHA" >> "$GITHUB_OUTPUT"
 
-          # Find the most recent ancestor commit that has a release
-          for sha in $(git log --format='%h' -20 HEAD~1); do
+          # Find the most recent ancestor commit that has a release.
+          # Use 8-char short SHAs to match our release tag convention.
+          for sha in $(git log --format='%H' -20 HEAD~1 | cut -c1-8); do
             TAG="pyodide-dist-${sha}"
             if gh release view "$TAG" --json tagName -q .tagName >/dev/null 2>&1; then
               echo "previous=$sha" >> "$GITHUB_OUTPUT"
@@ -42,11 +43,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
       - name: Download previous dist
-        if: steps.shas.outputs.previous
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="pyodide-dist-${{ steps.shas.outputs.previous }}"
+          PREV="${{ steps.shas.outputs.previous }}"
+          if [ -z "$PREV" ]; then
+            echo "::error::No previous dist release found in recent history."
+            echo "A JS-only rebuild requires an existing dist with WASM artifacts."
+            echo "Upload a full build first:"
+            echo "  gh release create pyodide-dist-\$(git rev-parse --short HEAD) dist.tar.gz --repo tjfontaine/pyodide"
+            exit 1
+          fi
+
+          TAG="pyodide-dist-${PREV}"
           echo "Downloading dist from release: $TAG"
           gh release download "$TAG" --pattern "pyodide-dist.tar.gz" --dir /tmp --clobber
           tar xzf /tmp/pyodide-dist.tar.gz
@@ -54,11 +63,10 @@ jobs:
           ls -lh dist/
 
       - name: Validate previous dist has WASM artifacts
-        if: steps.shas.outputs.previous
         run: |
           for f in pyodide.asm.wasm pyodide.asm.mjs python_stdlib.zip pyodide-lock.json; do
             if [ ! -f "dist/$f" ]; then
-              echo "::error::Previous dist missing $f — need a full WASM rebuild"
+              echo "::error::Previous dist missing $f — need a full WASM rebuild on the Docker host"
               exit 1
             fi
           done
@@ -67,11 +75,16 @@ jobs:
       - name: Check for WASM/C source changes
         id: wasm-check
         run: |
-          # If src/core/ or Makefile changed, a JS-only rebuild is insufficient
-          PREV_TAG="pyodide-dist-${{ steps.shas.outputs.previous }}"
-          PREV_FULL=$(git log --format='%H' -20 HEAD~1 | while read sha; do
-            short=$(echo "$sha" | cut -c1-8)
-            if [ "$short" = "${{ steps.shas.outputs.previous }}" ]; then
+          # If src/core/ or Makefile changed, a JS-only rebuild is insufficient.
+          # Compare against the commit that produced the previous dist release.
+          PREV_SHORT="${{ steps.shas.outputs.previous }}"
+          if [ -z "$PREV_SHORT" ]; then
+            echo "No previous release found — skipping WASM change check"
+            exit 0
+          fi
+
+          PREV_FULL=$(git log --format='%H' -30 | while read sha; do
+            if [ "$(echo "$sha" | cut -c1-8)" = "$PREV_SHORT" ]; then
               echo "$sha"
               break
             fi
