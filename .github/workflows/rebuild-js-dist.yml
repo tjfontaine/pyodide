@@ -1,0 +1,139 @@
+name: Rebuild JS dist
+
+# Rebuilds pyodide.mjs / pyodide.js when only the JS wrapper changes.
+# The WASM binary + stdlib are carried forward from the previous dist release.
+
+on:
+  push:
+    branches: [edge-agent-wasmfs-030]
+    paths:
+      - 'src/js/**'
+
+permissions:
+  contents: write  # needed for gh release create
+
+jobs:
+  rebuild-js:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Compute SHAs
+        id: shas
+        run: |
+          CURRENT_SHA=$(git rev-parse --short HEAD)
+          echo "current=$CURRENT_SHA" >> "$GITHUB_OUTPUT"
+
+          # Find the most recent ancestor commit that has a release
+          for sha in $(git log --format='%h' -20 HEAD~1); do
+            TAG="pyodide-dist-${sha}"
+            if gh release view "$TAG" --json tagName -q .tagName >/dev/null 2>&1; then
+              echo "previous=$sha" >> "$GITHUB_OUTPUT"
+              echo "Found previous dist release: $TAG"
+              break
+            fi
+          done
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Download previous dist
+        if: steps.shas.outputs.previous
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="pyodide-dist-${{ steps.shas.outputs.previous }}"
+          echo "Downloading dist from release: $TAG"
+          gh release download "$TAG" --pattern "pyodide-dist.tar.gz" --dir /tmp --clobber
+          tar xzf /tmp/pyodide-dist.tar.gz
+          echo "Previous dist contents:"
+          ls -lh dist/
+
+      - name: Validate previous dist has WASM artifacts
+        if: steps.shas.outputs.previous
+        run: |
+          for f in pyodide.asm.wasm pyodide.asm.mjs python_stdlib.zip pyodide-lock.json; do
+            if [ ! -f "dist/$f" ]; then
+              echo "::error::Previous dist missing $f — need a full WASM rebuild"
+              exit 1
+            fi
+          done
+          echo "All WASM artifacts present"
+
+      - name: Check for WASM/C source changes
+        id: wasm-check
+        run: |
+          # If src/core/ or Makefile changed, a JS-only rebuild is insufficient
+          PREV_TAG="pyodide-dist-${{ steps.shas.outputs.previous }}"
+          PREV_FULL=$(git log --format='%H' -20 HEAD~1 | while read sha; do
+            short=$(echo "$sha" | cut -c1-8)
+            if [ "$short" = "${{ steps.shas.outputs.previous }}" ]; then
+              echo "$sha"
+              break
+            fi
+          done)
+
+          if [ -n "$PREV_FULL" ]; then
+            WASM_CHANGES=$(git diff --name-only "$PREV_FULL" HEAD -- src/core/ Makefile cpython/ emsdk/ | head -5)
+            if [ -n "$WASM_CHANGES" ]; then
+              echo "::warning::WASM/C source files changed — JS-only rebuild may not be sufficient"
+              echo "$WASM_CHANGES"
+              echo "wasm_changed=true" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Install JS dependencies
+        working-directory: src/js
+        run: npm ci
+
+      - name: Compile jsverror.wasm from WAT
+        run: |
+          # jsverror.wasm is a tiny module compiled from WAT source
+          npm install -g wabt
+          wat2wasm src/core/jsverror.wat -o src/core/jsverror.wasm
+
+      - name: Rebuild JS bundle
+        working-directory: src/js
+        run: |
+          # Type-check then bundle with esbuild
+          npm run build
+          echo "Rebuilt JS bundle:"
+          ls -lh ../../dist/pyodide.mjs ../../dist/pyodide.js
+
+      - name: Verify mount path in bundle
+        run: |
+          # Sanity check: confirm the built bundle has the expected mount
+          if grep -q 'OPFS mounted at /' dist/pyodide.mjs; then
+            echo "Mount path verified: OPFS at /"
+          else
+            MOUNT=$(grep -oP 'OPFS mounted at [^"\\]+' dist/pyodide.mjs || echo "(not found)")
+            echo "::warning::Unexpected mount path: $MOUNT"
+          fi
+
+      - name: Package dist
+        run: |
+          tar czf /tmp/pyodide-dist.tar.gz dist/
+          echo "Tarball size: $(du -h /tmp/pyodide-dist.tar.gz | cut -f1)"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="pyodide-dist-${{ steps.shas.outputs.current }}"
+
+          # Delete existing release if re-running
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+
+          NOTES="JS-only rebuild of pyodide dist for ${{ steps.shas.outputs.current }}"
+          if [ "${{ steps.wasm-check.outputs.wasm_changed }}" = "true" ]; then
+            NOTES="$NOTES (warning: WASM source also changed — may need full rebuild)"
+          fi
+
+          gh release create "$TAG" /tmp/pyodide-dist.tar.gz \
+            --title "Pyodide dist (${{ steps.shas.outputs.current }})" \
+            --notes "$NOTES"
+
+          echo "Release created: $TAG"
