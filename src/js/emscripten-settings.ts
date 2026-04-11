@@ -96,7 +96,8 @@ function createHomeDirectory(path: string): PreRunFunc {
       try {
         Module.FS.mkdirTree(path);
       } catch (e) {
-        console.error(`Error making home directory '${path}':`, e);
+        // nosemgrep: javascript.lang.security.audit.unsafe-formatstring.unsafe-formatstring
+        console.error("Error making home directory %s: %o", path, e);
         path = fallbackPath;
       }
       try {
@@ -240,7 +241,7 @@ function getFileSystemInitializationFuncs(
           console.error("[WasmFS] stdlib not yet fetched when preMain fired!");
         }
 
-        const homePath = config.env.HOME || "/home/pyodide";
+        const homePath = config.env.HOME || "/";
         try { Module.FS.mkdirTree(homePath); } catch (_) {}
         try { Module.FS.chdir(homePath); } catch (_) {}
       });
@@ -266,7 +267,9 @@ export async function initFilesystemPostRuntime(
 ): Promise<void> {
   // At this point _createPyodideModule has resolved, initRuntime() has run,
   // and WasmFS is initialized. But callMain hasn't run (noInitialRun: true).
-  // We install stdlib, create dirs, mount OPFS, then call main manually.
+  //
+  // Sequence: mount OPFS at / first, then write stdlib into the OPFS-backed
+  // root so /lib persists and shell/Python share a single filesystem namespace.
 
   // 1. NativeFS (no-op with WasmFS)
   initializeNativeFS(Module);
@@ -274,29 +277,9 @@ export async function initFilesystemPostRuntime(
   // 2. Environment
   Object.assign(Module.ENV, config.env);
 
-  // 3. Install stdlib
-  let stdLibURL = config.stdLibURL ?? config.indexURL + "python_stdlib.zip";
-  const [pymajor, pyminor] = computeVersionTuple(Module);
-  Module.API.pyVersionTuple = [pymajor, pyminor, 0];
-  Module.FS.mkdirTree("/lib");
-  Module.API.sitePackages = `/lib/python${pymajor}.${pyminor}/site-packages`;
-  Module.FS.mkdirTree(Module.API.sitePackages);
-
-  const stdlib = await loadBinaryFile(stdLibURL);
-  Module.FS.writeFile(`/lib/python${pymajor}${pyminor}.zip`, stdlib);
-
-  // 4. Home directory
-  const homePath = config.env.HOME || "/home/pyodide";
-  try { Module.FS.mkdirTree(homePath); } catch (_) {}
-  try { Module.FS.chdir(homePath); } catch (_) {}
-
-  // 5. fsInit hook
-  if (config.fsInit) {
-    await config.fsInit(Module.FS, { sitePackages: Module.API.sitePackages });
-  }
-
-  // 6. Mount OPFS at /opfs via promising-wrapped raw WASM exports.
-  // The new JSPI API (WebAssembly.promising) does NOT prepend a suspender arg.
+  // 3. Mount OPFS at / via promising-wrapped raw WASM exports.
+  // Must happen BEFORE stdlib installation so /lib lands in OPFS, not the
+  // default in-memory WasmFS backend (which would be shadowed by the mount).
   try {
     const rawExports = (Module as any)._rawWasmExports;
     if (rawExports?.wasmfs_create_opfs_backend) {
@@ -304,11 +287,8 @@ export async function initFilesystemPostRuntime(
       const createOpfs = promising(rawExports.wasmfs_create_opfs_backend);
       const opfs = await createOpfs();
       if (opfs) {
-        // Mount OPFS at /home/user — this maps to navigator.storage.getDirectory().
-        // The shell's OPFS root is /, so shell's /foo.txt = Python's /home/user/foo.txt.
-        // This avoids a confusing /opfs prefix and matches the shell's home directory.
         const M = Module as any;
-        const mountPath = "/home/user";
+        const mountPath = "/";
         const pathBytes = new TextEncoder().encode(mountPath + "\0");
         const pathPtr = M._malloc(pathBytes.length);
         M.HEAPU8.set(pathBytes, pathPtr);
@@ -318,12 +298,34 @@ export async function initFilesystemPostRuntime(
         if (ret < 0) {
           console.warn("[PyodideLoader] OPFS mount returned:", ret);
         } else {
-          console.log("[PyodideLoader] OPFS mounted at " + mountPath);
+          console.log("[PyodideLoader] OPFS mounted at /");
         }
       }
     }
   } catch (e) {
     console.warn("[PyodideLoader] Could not mount OPFS:", e);
+  }
+
+  // 4. Install stdlib into the now-OPFS-backed root.
+  // Written fresh each boot so version changes are picked up immediately.
+  const stdLibURL = config.stdLibURL ?? config.indexURL + "python_stdlib.zip";
+  const [pymajor, pyminor] = computeVersionTuple(Module);
+  Module.API.pyVersionTuple = [pymajor, pyminor, 0];
+  Module.FS.mkdirTree("/lib");
+  Module.API.sitePackages = `/lib/python${pymajor}.${pyminor}/site-packages`;
+  Module.FS.mkdirTree(Module.API.sitePackages);
+
+  const stdlib = await loadBinaryFile(stdLibURL);
+  Module.FS.writeFile(`/lib/python${pymajor}${pyminor}.zip`, stdlib);
+
+  // 5. Home directory — with OPFS at /, HOME=/ is typical.
+  const homePath = config.env.HOME || "/";
+  try { Module.FS.mkdirTree(homePath); } catch (_) {}
+  try { Module.FS.chdir(homePath); } catch (_) {}
+
+  // 6. fsInit hook
+  if (config.fsInit) {
+    await config.fsInit(Module.FS, { sitePackages: Module.API.sitePackages });
   }
 
   // Polyfills should already be set from preRun, but ensure they're present
