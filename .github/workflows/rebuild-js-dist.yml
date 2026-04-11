@@ -8,6 +8,7 @@ on:
     branches: [edge-agent-wasmfs-030]
     paths:
       - 'src/js/**'
+  workflow_dispatch:
 
 permissions:
   contents: write  # needed for gh release create
